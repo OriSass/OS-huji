@@ -1,0 +1,113 @@
+ori.sass,zivbengigi
+206789182,314750795
+
+EX: 1
+
+FILES:
+README
+Makefile
+memory_latency.cpp
+results.png
+lscpu.png
+page_size.png
+
+REMARKS:
+
+
+ANSWERS:
+
+Assignment 1
+    A brief description of what the program does:
+    1) Start's program execution (execve):
+        The execve() system call loads and executes the binary WhatIDo.
+        It replaces the current process with the new executable.
+        The second argument (command-line arguments) suggests it might expect input.
+        The third argument (environment variables) contains 78 variables.
+        The return value 0 indicates that the program successfully started execution.
+
+    2) Setting up memory for execution (brk, mmap):
+        The program checks the current break pointer (end of the heap).
+        No memory is allocated yet—just retrieving the position.
+
+    3) Dynamic Linker (ld.so) and library loading:
+        Checking for Preloaded Libraries (access).
+        Loading Shared Library Cache (ld.so.cache).
+        Opening the Standard C Library (libc.so.6), (required for basic system functions).
+        Mapping libc.so.6 into Memory:
+            Several mmap() calls allocate different sections of libc.so.6 into memory:
+
+    4) Process Setup & Security Features:
+        Sets up the Thread Local Storage (TLS) pointer (arch_prctl).
+        Process Initialization (Thread ID - set_tid_address, and Robust List - set_robust_list)
+        The robust mutex list is used for thread sync.
+        Stack Protection (prlimit64)
+
+    5) Error Handling and Randomization:
+        Duplicating stderr (dup, fcntl).
+        Generating Random Data (getrandom), used for security features etc.
+
+    6) Error Message Handling:
+        prints to stderr(write)
+
+    7) Program Exits Normally:
+       The program exits with status 0 (indicating success).
+       This is contradictory because it printed an error message but still exited successfully.
+
+Assignment 2
+    1. Axes:
+    X-axis (log scale): Bytes allocated — array sizes from ~100 bytes to 10 GB.
+    Y-axis (log scale): Latency in nanoseconds (ns) — how long each access takes.
+
+    2. Lines:
+    Blue line (Random access): Shows latency for random memory accesses.
+    Orange line (Sequential access): Shows latency for sequential memory accesses.
+
+    3. Vertical markers:
+    Each vertical line represents a cache level or memory threshold:
+    Red line: L1d cache (32 KiB)
+    Green line: L2 cache (256 KiB)
+    Brown line: L3 cache (6 MiB)
+    Pink line: Eviction threshold / RAM boundary (~1.5 GiB)
+
+    4. Interpretation of the Results:
+    🟦 Random Access:
+    Flat latency at first: For small arrays (under ~32 KiB), latency is flat and low. Data fits entirely in L1 cache.
+    Slight increase after 32 KiB: As the array grows past L1, latency rises — L2 cache access (~5 ns).
+    Another jump past 256 KiB: L2 cache overflows; access is now in L3 cache (~10 ns).
+    Big jump past ~6 MiB: L3 cache overflows. Main memory (RAM) access is much slower (~50-100 ns).
+    Slight increase near 1.5 GiB: May be due page table overhead.
+
+    🟧 Sequential Access:
+    Very low and consistent latency: Because of hardware prefetching, sequential access benefits from loading data
+    ahead of time. Small rise at larger sizes: Slight increase due to prefetching limits or TLB/page faults,
+    but overall, sequential access stays efficient even in RAM.
+
+    5. Takeaway:
+    Memory hierarchy matters. As data size grows, caching becomes less effective, and latency increases.
+    Random access is expensive at large sizes due to cache misses and RAM latency.
+    Sequential access remains efficient across the board due to prefetching.
+
+Bonus
+
+    Between L3 Cache (6 MiB) and Eviction Threshold (1.5 GiB):
+
+    Once data size exceeds the L3 cache, the system begins to access main memory (DRAM) much more frequently
+    because none of the data fits into CPU caches anymore.
+    Random access latency increases sharply in this region — from around 10 ns up to 60–100 ns.
+    The curve flattens out but still fluctuates — this reflects variations in DRAM access latency,
+    row buffer hits/misses, and page-level locality.
+
+    Latency keep increasing slightly because as address space grows, TLB becomes less effective,
+    and the system must walk page tables, adding overhead.
+    DRAM bank conflicts and row activations can further increase access time during random access.
+
+    After Eviction Threshold (~1.5 GiB): //0.5 * (4096 / 8) * 6291456
+
+    The Eviction Threshold likely represents the point where memory pressure forces the OS to start evicting pages,
+    meaning:
+
+    Some parts of the program’s working set are swapped out or invalidated from DRAM.
+    New allocations cause page replacements, possibly hitting virtual memory or invoking kernel-level memory management.
+
+    Random access latency flattens but remains high (~100 ns or more), indicating that we're fully operating in DRAM
+    with no cache help.
