@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <queue>
 #include <vector>
+#include <functional>
 #include <csignal>      // for sigaction, SIGVTALRM
 #include <sys/time.h>   // for setitimer
 #include <iostream>
@@ -11,7 +12,11 @@
 #include <setjmp.h>
 
 
-using std::queue, std::unordered_map, std::vector;
+using std::queue;
+using std::unordered_map;
+using std::vector;
+using std::priority_queue;
+using std::greater;
 
 #define MAIN_THREAD_TID 0
 
@@ -32,10 +37,16 @@ class Thread{
     State state;
     int quantums_passed;
     jmp_buf env; // store the execution context
+    thread_entry_point entry_point;
+    void* stack;  // Pointer to the thread's stack
 
 
-  public:
-    Thread(int tid, bool is_main) : tid(tid), state(READY){
+
+ public:
+    Thread(int tid, State state, bool is_main, thread_entry_point
+    entry_point = nullptr, void* stack= nullptr) : tid(tid), state(state),
+    entry_point
+    (entry_point), stack(stack){
       quantums_passed = is_main ? 1 : 0;
       setup_env();
     }
@@ -60,22 +71,30 @@ class Thread{
     }
     return false; // If sigsetjmp returns non-zero, it was called via siglongjmp
   }
+
+  // Destructor to free the stack memory
+  ~Thread() {
+    free(stack);
+  }
 };
 
+void remove_tid_from_ready_queue (int tid);
+void terminate_process ();
 static int quantum_def;
 static int quantums_passed;
 static int running_tid;
 
 static queue<int> ready_queue;
 static unordered_map<int,Thread*> threads_map;
-static vector<int> available_tids;
+static priority_queue<int, vector<int>, greater<int>> available_tids;
+static int thread_count;
 // ========================
 // Function Definitions
 // ========================
 
 void init_available_tids() {
   for (int i = 1; i < MAX_THREAD_NUM; ++i) {
-    available_tids.push_back(i);
+    available_tids.push(i);
   }
 }
 
@@ -156,10 +175,10 @@ int uthread_init(int quantum_usecs)
   quantum_def = quantum_usecs;
   quantums_passed = 1;
 
-  Thread* main_thread = new Thread(MAIN_THREAD_TID, true);
-  main_thread->set_state (RUNNING);
+  Thread* main_thread = new Thread(MAIN_THREAD_TID,RUNNING, true, nullptr, nullptr);
   threads_map[MAIN_THREAD_TID] = main_thread;
 
+  thread_count = 1;
   setup_signal_handler();
   setup_timer (quantum_def);
 
@@ -183,8 +202,41 @@ int uthread_init(int quantum_usecs)
  */
 int uthread_spawn(thread_entry_point entry_point)
 {
-  // TODO: implement
-  return 0;
+  if(thread_count == MAX_THREAD_NUM){
+    std::cerr << "thread library error: cannot create new thread, max "
+                 "threads reached.\n";
+    return -1;
+  }
+  if(entry_point == nullptr){
+    std::cerr << "thread library error: Thread entry point can't be null\n";
+    return -1;
+  }
+
+  if (available_tids.empty()) {
+    std::cerr << "thread library error: no available thread IDs\n";
+    return -1;
+  }
+
+  // Allocate memory for the thread's stack
+  void* stack = malloc(STACK_SIZE);
+  if (!stack) {
+    std::cerr << "thread library error: failed to allocate memory for thread stack\n";
+    return -1;
+  }
+
+  int new_tid = available_tids.top();
+  available_tids.pop();
+
+
+  Thread* new_thread = new Thread(new_tid, READY, false, entry_point, stack);
+  threads_map[new_tid] = new_thread;
+
+  ready_queue.push (new_tid);
+
+  thread_count++;
+
+
+  return new_tid;
 }
 
 
@@ -200,8 +252,55 @@ int uthread_spawn(thread_entry_point entry_point)
  */
 int uthread_terminate(int tid)
 {
-  // TODO: implement
-  return 0;
+    if(tid == 0){
+      terminate_process();
+      exit(0);
+    }
+    if(threads_map.find (tid) == threads_map.end())
+    {
+      std::cerr << "thread library error: no thread with tid: " << tid << "\n";
+      return -1;
+    }
+    // if we got here we are in the main case where there is such a thread and
+    // we need to delete it
+    Thread* thread_to_terminate = threads_map[tid];
+
+
+    remove_tid_from_ready_queue(tid);
+    threads_map.erase(tid);
+    // Add tid back to available_tids for reuse
+    available_tids.push(tid);
+
+    delete thread_to_terminate;
+    thread_count--;
+
+    return 0;
+  }
+void terminate_process ()
+{
+  for (auto& pair : threads_map) {
+    int tid = pair.first;
+    // Skip terminating the main thread (tid == 0) if that's part of your design
+    if (tid != MAIN_THREAD_TID) {
+      uthread_terminate(tid);
+    }
+  }
+}
+void remove_tid_from_ready_queue (int tid)
+{
+  std::queue<int> temp_queue;
+
+  // Iterate through the ready queue to find and remove the tid
+  while (!ready_queue.empty()) {
+    int current_tid = ready_queue.front();
+    ready_queue.pop();
+    if (current_tid != tid) {
+      temp_queue.push(current_tid);  // Keep the other TIDs
+    }
+  }
+
+  // Update the original ready queue to reflect the removal
+  ready_queue = temp_queue;
 }
 
 
