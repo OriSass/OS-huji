@@ -24,8 +24,6 @@ using std::greater;
 // Internal Global Variables
 // ========================
 
-// TODO: Add thread management structures here (e.g., ready queue, threads map, etc.)
-
 enum State{
     RUNNING, BLOCKED, READY
 };
@@ -463,8 +461,7 @@ void schedule ()
  */
 int uthread_get_tid()
 {
-  // TODO: implement
-  return 0;
+  return current_running_thread_tid;
 }
 
 
@@ -478,8 +475,7 @@ int uthread_get_tid()
  */
 int uthread_get_total_quantums()
 {
-  // TODO: implement
-  return 0;
+  return quantums_passed;
 }
 
 
@@ -494,6 +490,9 @@ int uthread_get_total_quantums()
  */
 int uthread_get_quantums(int tid)
 {
-  // TODO: implement
-  return 0;
+  if(!thread_exists(tid)){
+    std::cerr << "thread library error: no thread with tid: " << tid << "\n";
+    return -1;
+  }
+  return threads_map[tid]->get_quantums_passed();
 }
