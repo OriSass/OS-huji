@@ -1,4 +1,5 @@
 #include "resources/uthreads.h"
+#include "resources/demo_jmp.c"
 #include <iostream>
 #include <unordered_map>
 #include <queue>
@@ -72,11 +73,39 @@ class Thread{
   }
 
   // Initialize the execution context for the thread
+  // Modify your setup_env method
   bool setup_env() {
     if (sigsetjmp(env, 1) == 0) {
-      return true;  // If sigsetjmp returns 0, it is called the first time
+      // If this is the main thread or we're just saving context, return true
+      if (tid == MAIN_THREAD_TID || !entry_point) {
+        return true;
+      }
+
+      // Setup for a new thread with entry_point
+      // Calculate the top of the stack (stack grows downward)
+      address_t sp = (address_t)stack + STACK_SIZE - sizeof(address_t);
+
+      // Set the program counter to the entry point function
+      address_t pc = (address_t)entry_point;
+
+      // Translate and store both addresses in the jmp_buf
+      (env->__jmpbuf)[JB_SP] = translate_address(sp);
+      (env->__jmpbuf)[JB_PC] = translate_address(pc);
+
+      return true;
     }
-    return false; // If sigsetjmp returns non-zero, it was called via siglongjmp
+
+    // If we get here, we've returned from siglongjmp
+    // This is where the new thread actually starts executing
+    // For non-main threads, call their entry point
+    if (tid != MAIN_THREAD_TID && entry_point) {
+      entry_point();
+
+      // If the entry point returns, we need to terminate the thread
+      uthread_terminate(tid);
+    }
+
+    return false;
   }
 
   // Destructor to free the stack memory
@@ -109,7 +138,6 @@ void init_available_tids() {
 
 // This function will be called every time the quantum ends
 void timer_handler(int sig) {
-  std::cout << "Quantum expired! Performing context switch..." << std::endl;
   (void)sig; // to suppress unused warning
 
   schedule();
