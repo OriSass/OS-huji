@@ -64,6 +64,15 @@ class Thread{
     return &env;
   }
 
+  State get_state () const
+  {
+    return state;
+  }
+  int get_quantums_passed () const
+  {
+    return quantums_passed;
+  }
+
   // Initialize the execution context for the thread
   bool setup_env() {
     if (sigsetjmp(env, 1) == 0) {
@@ -80,12 +89,14 @@ class Thread{
 
 void remove_tid_from_ready_queue (int tid);
 void terminate_process ();
+void schedule ();
 static int quantum_def;
 static int quantums_passed;
-static int running_tid;
+static int current_running_thread_tid;
 
 static queue<int> ready_queue;
 static unordered_map<int,Thread*> threads_map;
+static unordered_map<int, int> sleeping_threads;
 static priority_queue<int, vector<int>, greater<int>> available_tids;
 static int thread_count;
 // ========================
@@ -103,23 +114,25 @@ void timer_handler(int sig) {
   std::cout << "Quantum expired! Performing context switch..." << std::endl;
   (void)sig; // to suppress unused warning
 
-  if (sigsetjmp(reinterpret_cast<__jmp_buf_tag *>(threads_map[running_tid]->get_env ()), 1) != 0) {
+  schedule();
+
+  if (sigsetjmp(reinterpret_cast<__jmp_buf_tag *>(threads_map[current_running_thread_tid]->get_env ()), 1) != 0) {
     return; // if returning from siglongjmp, just return
   }
   //  1. If it was preempted because its quantum has expired, move it to the end of the
   //  READY threads list.
-  threads_map[running_tid]->set_state (READY);
-  ready_queue.push (running_tid);
+  threads_map[current_running_thread_tid]->set_state (READY);
+  ready_queue.push (current_running_thread_tid);
   //  2. Move the next thread in the queue of READY threads to the RUNNING state
-  running_tid = ready_queue.front();
+  current_running_thread_tid = ready_queue.front();
   ready_queue.pop();
 
-  threads_map[running_tid]->set_state(RUNNING);
-  threads_map[running_tid]->increment_quantum();
+  threads_map[current_running_thread_tid]->set_state(RUNNING);
+  threads_map[current_running_thread_tid]->increment_quantum();
 
   quantums_passed++;
 
-  siglongjmp(reinterpret_cast<__jmp_buf_tag *>(threads_map[running_tid]->get_env ()), 1);
+  siglongjmp(reinterpret_cast<__jmp_buf_tag *>(threads_map[current_running_thread_tid]->get_env ()), 1);
 
 }
 
@@ -171,7 +184,7 @@ int uthread_init(int quantum_usecs)
     std::cerr << "thread library error: quantum should be positive\n";
     return -1;
   }
-  running_tid = MAIN_THREAD_TID;
+  current_running_thread_tid = MAIN_THREAD_TID;
   quantum_def = quantum_usecs;
   quantums_passed = 1;
 
@@ -239,6 +252,9 @@ int uthread_spawn(thread_entry_point entry_point)
   return new_tid;
 }
 
+bool thread_exists(int tid){
+  return threads_map.find (tid) != threads_map.end();
+}
 
 /**
  * @brief Terminates the thread with ID tid and deletes it from all relevant control structures.
@@ -256,7 +272,7 @@ int uthread_terminate(int tid)
       terminate_process();
       exit(0);
     }
-    if(threads_map.find (tid) == threads_map.end())
+    if(!thread_exists(tid))
     {
       std::cerr << "thread library error: no thread with tid: " << tid << "\n";
       return -1;
@@ -315,7 +331,39 @@ void remove_tid_from_ready_queue (int tid)
  */
 int uthread_block(int tid)
 {
-  // TODO: implement
+  if(tid == MAIN_THREAD_TID){
+    std::cerr << "thread library error: can't block main thread: \n";
+    return -1;
+  }
+  if(!thread_exists(tid)){
+    std::cerr << "thread library error: no thread with tid: " << tid << "\n";
+    return -1;
+  }
+  // if we got here there is such a thread
+  Thread* thread_to_block = threads_map[tid];
+  if(thread_to_block->get_state() == BLOCKED){
+    return 0;
+  }
+  if(tid == current_running_thread_tid){
+    // If the current running thread is being blocked, we need to perform a scheduling decision
+    // 1. Move the current thread to the BLOCKED state
+    thread_to_block->set_state(BLOCKED);
+
+    // 2. Make the scheduling decision:
+    // Move the blocked thread to the end of the ready queue
+    ready_queue.push(current_running_thread_tid);
+
+    // 3. Select the next thread to run
+    current_running_thread_tid = ready_queue.front();
+    ready_queue.pop();
+
+    // 4. Set the new running thread state to RUNNING
+    threads_map[current_running_thread_tid]->set_state(RUNNING);
+
+    // Switch context: saving current thread's context and jumping to the new thread
+    siglongjmp(*threads_map[current_running_thread_tid]->get_env(), 1);
+  }
+  thread_to_block->set_state (BLOCKED);
   return 0;
 }
 
@@ -330,7 +378,20 @@ int uthread_block(int tid)
  */
 int uthread_resume(int tid)
 {
-  // TODO: implement
+  if(!thread_exists(tid)){
+    std::cerr << "thread library error: no thread with tid: " << tid << "\n";
+    return -1;
+  }
+  // if we got here there is such a thread
+  Thread* thread_to_resume = threads_map[tid];
+  State thread_state = thread_to_resume -> get_state();
+  if(thread_state == RUNNING || thread_state == READY){
+    return 0;
+  }
+  if(thread_state == BLOCKED){
+    thread_to_resume->set_state (READY);
+    ready_queue.push (tid);
+  }
   return 0;
 }
 
@@ -350,10 +411,50 @@ int uthread_resume(int tid)
  */
 int uthread_sleep(int num_quantums)
 {
-  // TODO: implement
+  if (current_running_thread_tid == MAIN_THREAD_TID) {
+    std::cerr << "thread library error: main thread cannot sleep.\n";
+    return -1;
+  }
+
+  if (num_quantums <= 0) {
+    std::cerr << "thread library error: invalid number of quantums.\n";
+    return -1;
+  }
+  // Get the current running thread
+  Thread* running_thread = threads_map[current_running_thread_tid];
+
+  // Move the current thread to BLOCKED state
+  running_thread->set_state(BLOCKED);
+
+  // Add the sleeping thread to a map with num_quantums as the key (to track when it should be resumed)
+  sleeping_threads[current_running_thread_tid] = num_quantums;
+
+  schedule();
+
   return 0;
 }
+void schedule ()
+{
+  // Check sleeping threads and move them back to READY if their time is up
+  for (auto it = sleeping_threads.begin(); it != sleeping_threads.end(); ) {
+    int tid = it->first;
+    int remaining_quantums = it->second;
 
+    if (remaining_quantums <= 0) {
+      // The thread has finished sleeping
+      Thread* thread_to_wake = threads_map[tid];
+      thread_to_wake->set_state(READY);
+      ready_queue.push(tid);
+
+      // Remove from sleeping threads
+      it = sleeping_threads.erase(it);  // Erase and move to next element
+    } else {
+      // Decrease the number of quantums remaining
+      it->second--;
+      ++it;
+    }
+  }
+}
 
 /**
  * @brief Returns the thread ID of the calling thread.
