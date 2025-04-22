@@ -142,7 +142,8 @@ void timer_handler(int sig) {
 
   schedule();
 
-  if (sigsetjmp(reinterpret_cast<__jmp_buf_tag *>(threads_map[current_running_thread_tid]->get_env ()), 1) != 0) {
+  if (sigsetjmp(*threads_map[current_running_thread_tid]->get_env (), 1) !=
+  0) {
     return; // if returning from siglongjmp, just return
   }
   //  1. If it was preempted because its quantum has expired, move it to the end of the
@@ -158,7 +159,7 @@ void timer_handler(int sig) {
 
   quantums_passed++;
 
-  siglongjmp(reinterpret_cast<__jmp_buf_tag *>(threads_map[current_running_thread_tid]->get_env ()), 1);
+  siglongjmp(*threads_map[current_running_thread_tid]->get_env (), 1);
 
 }
 
@@ -170,8 +171,8 @@ void setup_signal_handler() {
   sa.sa_flags = 0;
 
   if (sigaction(SIGVTALRM, &sa, nullptr) < 0) {
-    std::cerr << "Error setting up signal handler" << std::endl;
-    exit(1);
+    std::cerr << "system error: Error setting up signal handler" << std::endl;
+    exit(-1);
   }
 }
 
@@ -375,9 +376,11 @@ int uthread_block(int tid)
     // 1. Move the current thread to the BLOCKED state
     thread_to_block->set_state(BLOCKED);
 
-    // 2. Make the scheduling decision:
-    // Move the blocked thread to the end of the ready queue
-    ready_queue.push(current_running_thread_tid);
+    // 2. Check the ready queue isn't empty:
+    if (ready_queue.empty()) {
+      std::cerr << "thread library error: no threads to schedule after blocking the current one.\n";
+      return -1;
+    }
 
     // 3. Select the next thread to run
     current_running_thread_tid = ready_queue.front();
