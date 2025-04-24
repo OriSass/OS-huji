@@ -241,7 +241,7 @@ void update_sleeping_threads(){
       // if the thread is done sleeping and not blocked,
       // we wake it up and add it to the ready queue
       if(threads_map[i]->get_remaining_sleep_time() == 0 &&
-                                                         threads_map[i]->get_is_sleeping ()){
+                                                         threads_map[i]->get_is_sleeping () && threads_map[i]->get_state() != BLOCKED){
         ready_queue.push (i);
         threads_map[i]->set_state (READY);
         threads_map[i]->set_is_sleeping(false);
@@ -580,8 +580,12 @@ int uthread_resume(int tid)
   if(thread_state == RUNNING || thread_state == READY){
     return 0;
   }
-  if(thread_state == BLOCKED && thread_to_resume->get_remaining_sleep_time()
-  == 0){
+//  if(thread_state == BLOCKED && thread_to_resume->get_remaining_sleep_time()
+//  == 0){
+//    thread_to_resume->set_state (READY);
+//    ready_queue.push (tid);
+//  }
+  if(thread_state == BLOCKED){
     thread_to_resume->set_state (READY);
     ready_queue.push (tid);
   }
