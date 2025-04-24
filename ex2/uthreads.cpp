@@ -521,6 +521,7 @@ int uthread_block(int tid)
   if (tid == current_running_thread_tid)
   {
     switch_threads(true, false);
+    return 0;
   }
   // if we got here there is such a thread
   Thread* thread_to_block = threads_map[tid];
