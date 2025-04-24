@@ -73,6 +73,7 @@ class context_switch_lock
  private:
   static void disable_context_switch()
   {
+//    std::cerr << "[debug] Blocking SIGVTALRM\n";
     sigset_t sigset;
     sigemptyset(&sigset);
     sigaddset(&sigset, SIGVTALRM);
@@ -85,6 +86,7 @@ class context_switch_lock
 
   static void enable_context_switch()
   {
+//    std::cerr << "[debug] Unblocking SIGVTALRM\n";
     sigset_t sigset;
     sigemptyset(&sigset);
     sigaddset(&sigset, SIGVTALRM);
@@ -249,9 +251,12 @@ void update_sleeping_threads(){
     }
   }
 }
+void setup_timer();
 // This function will be called every time the quantum ends
 void timer_handler(int sig) {
-
+  setup_timer();
+//  setbuf(stdout, 0);
+//  std::cerr << "TIMER FIRED\n";
   // needs to do 2 things:
   // 1) move sleeper threads into the ready queue if finished sleep
   delete_awaiting_threads();
@@ -290,10 +295,12 @@ void timer_handler(int sig) {
 void setup_signal_handler() {
   struct sigaction sa{};
   sa.sa_handler = &timer_handler;
+  sa.sa_flags = 0;
   int sigset_retval = 0;
   sigset_retval += sigemptyset(&sa.sa_mask);
   sigset_retval += sigaddset(&sa.sa_mask, SIGVTALRM);
   sigset_retval += sigaction(SIGVTALRM, &sa, nullptr);
+
 
   if (sigset_retval != 0) {
     std::cerr << "system error: Error setting up signal handler" << std::endl;
@@ -770,7 +777,7 @@ void switch_threads(bool is_blocked, bool terminate_running)
     ready_queue.push (current_running_thread_tid);
   }
   else if(!terminate_running){
-    setup_timer();
+//    setup_timer();
     current_thread->set_state (BLOCKED);
   }
   // Update state of current thread
@@ -796,7 +803,7 @@ void switch_threads(bool is_blocked, bool terminate_running)
   next_thread->increment_quantum();
   quantums_passed++;
 //  std::cerr << "Switching to thread: " << current_running_thread_tid << std::endl;
-
+  setup_timer();
   siglongjmp(*next_thread->get_env(), 1);
 }
 
