@@ -179,10 +179,11 @@ class Thread{
       // Set the program counter to the entry point function
       address_t pc = (address_t)entry_point;
 
+      (void)sigsetjmp(env, 1);
       // Translate and store both addresses in the jmp_buf
       (env->__jmpbuf)[JB_SP] = translate_address(sp);
       (env->__jmpbuf)[JB_PC] = translate_address(pc);
-
+      (void)sigemptyset(&env->__saved_mask);
       return true;
     }
 
