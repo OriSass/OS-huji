@@ -775,7 +775,9 @@ void switch_threads(bool is_blocked, bool terminate_running)
   if (!is_blocked && !terminate_running)
   {
     current_thread->set_state (READY);
-    ready_queue.push (current_running_thread_tid);
+    if(!current_thread->get_is_sleeping()){
+      ready_queue.push (current_running_thread_tid);
+    }
   }
   else if(!terminate_running){
 //    setup_timer();
