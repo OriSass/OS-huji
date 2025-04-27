@@ -26,6 +26,9 @@ typedef unsigned long address_t;
 #define JB_SP 6
 #define JB_PC 7
 
+static int stack_alloc_count = 0;
+static int stack_free_count = 0;
+
 /* A translation is required when using an address of a variable.
    Use this as a black box in your code. */
 address_t translate_address(address_t addr)
@@ -67,13 +70,16 @@ address_t translate_address(address_t addr)
 class context_switch_lock
 {
  public:
-  context_switch_lock() { disable_context_switch (); }
-  ~context_switch_lock() { enable_context_switch (); }
+  context_switch_lock() {
+    disable_context_switch ();
+  }
+  ~context_switch_lock() {
+    enable_context_switch ();
+  }
 
  private:
   static void disable_context_switch()
   {
-//    std::cerr << "[debug] Blocking SIGVTALRM\n";
     sigset_t sigset;
     sigemptyset(&sigset);
     sigaddset(&sigset, SIGVTALRM);
@@ -86,7 +92,6 @@ class context_switch_lock
 
   static void enable_context_switch()
   {
-//    std::cerr << "[debug] Unblocking SIGVTALRM\n";
     sigset_t sigset;
     sigemptyset(&sigset);
     sigaddset(&sigset, SIGVTALRM);
@@ -110,7 +115,7 @@ class Thread{
     int quantums_passed;
     jmp_buf env; // store the execution context
     thread_entry_point entry_point;
-    void* stack;  // Pointer to the thread's stack
+    char* stack;  // Pointer to the thread's stack
     int remaining_sleep_time;
     bool is_sleeping;
 
@@ -118,12 +123,18 @@ class Thread{
 
  public:
     Thread(int tid, State state, bool is_main, thread_entry_point
-    entry_point = nullptr, void* stack= nullptr) : tid(tid), state(state),
+    entry_point = nullptr, char* stack= nullptr) : tid(tid), state(state),
     entry_point
     (entry_point), stack(stack), is_sleeping(false){
+      stack_alloc_count++;
       quantums_passed = is_main ? 1 : 0;
       setup_env();
     }
+
+  int get_tid () const
+  {
+    return tid;
+  }
 
   void set_state (State state)
   {
@@ -202,23 +213,29 @@ class Thread{
 
   // Destructor to free the stack memory
   ~Thread() {
-    free(stack);
+    if (stack != nullptr) {
+      delete[] stack;
+      stack = nullptr;
+      stack_free_count++; // Track each deallocation
+    }
   }
 };
 
 void remove_tid_from_ready_queue (int tid);
 void terminate_process ();
-void schedule ();
+
 static int quantum_def;
 static int quantums_passed;
 static int current_running_thread_tid;
+static int thread_count;
+static bool terminate = false;
 
 static queue<int> ready_queue;
 static unordered_map<int,Thread*> threads_map;
-//static unordered_map<int, int> sleeping_threads;
 static priority_queue<int, vector<int>, greater<int>> available_tids;
 static vector<int> threads_to_delete;
-static int thread_count;
+
+
 // ========================
 // Function Definitions
 // ========================
@@ -253,43 +270,13 @@ void update_sleeping_threads(){
   }
 }
 void setup_timer();
+void terminate_process_from_non_main ();
 // This function will be called every time the quantum ends
 void timer_handler(int sig) {
   setup_timer();
-//  setbuf(stdout, 0);
-//  std::cerr << "TIMER FIRED\n";
-  // needs to do 2 things:
-  // 1) move sleeper threads into the ready queue if finished sleep
   delete_awaiting_threads();
   update_sleeping_threads();
-  // 2) switch to the next thread TODO WHY?
   switch_threads (false, false);
-
-
-
-//  (void)sig; // to suppress unused warning
-
-//  schedule();
-//  switch_threads(false, false);
-//  if (sigsetjmp(*threads_map[current_running_thread_tid]->get_env (), 1) !=
-//  0) {
-//    return; // if returning from siglongjmp, just return
-//  }
-//  //  1. If it was preempted because its quantum has expired, move it to the end of the
-//  //  READY threads list.
-//  threads_map[current_running_thread_tid]->set_state (READY);
-//  ready_queue.push (current_running_thread_tid);
-//  //  2. Move the next thread in the queue of READY threads to the RUNNING state
-//  current_running_thread_tid = ready_queue.front();
-//  ready_queue.pop();
-//
-//  threads_map[current_running_thread_tid]->set_state(RUNNING);
-//  threads_map[current_running_thread_tid]->increment_quantum();
-//
-//  quantums_passed++;
-//
-//  siglongjmp(*threads_map[current_running_thread_tid]->get_env (), 1);
-
 }
 
 // Sets up the signal handler for SIGVTALRM
@@ -298,12 +285,10 @@ void setup_signal_handler() {
   sa.sa_handler = &timer_handler;
   sa.sa_flags = 0;
   int sigset_retval = 0;
-  sigset_retval += sigemptyset(&sa.sa_mask);
-  sigset_retval += sigaddset(&sa.sa_mask, SIGVTALRM);
-  sigset_retval += sigaction(SIGVTALRM, &sa, nullptr);
+  sigemptyset(&sa.sa_mask);
+  sigaddset(&sa.sa_mask, SIGVTALRM);
 
-
-  if (sigset_retval != 0) {
+  if (sigaction(SIGVTALRM, &sa, nullptr) != 0) {
     std::cerr << "system error: Error setting up signal handler" << std::endl;
     exit(1);
   }
@@ -397,8 +382,10 @@ int uthread_spawn(thread_entry_point entry_point)
   }
 
   // Allocate memory for the thread's stack
-  void* stack = malloc(STACK_SIZE);
-  if (!stack) {
+  char* stack = nullptr;
+  try {
+    stack = new char[STACK_SIZE];
+  } catch (const std::bad_alloc&) {
     std::cerr << "thread library error: failed to allocate memory for thread stack\n";
     return -1;
   }
@@ -418,13 +405,14 @@ int uthread_spawn(thread_entry_point entry_point)
   return new_tid;
 }
 static void destroy_thread(int tid){
-//  std::cerr << "Destroying thread: " << tid << std::endl;
-  Thread* thread = threads_map[tid];
-  delete thread;
-  threads_map[tid] = nullptr;
-//  sleeping_threads.erase(tid);
-  available_tids.push(tid);
-  thread_count--;
+  if (threads_map[tid] != nullptr)
+  {
+    Thread *thread = threads_map[tid];
+    delete thread;
+    threads_map[tid] = nullptr;
+    available_tids.push (tid);
+    thread_count--;
+  }
 }
 
 void delete_awaiting_threads ()
@@ -453,7 +441,11 @@ bool thread_exists(int tid){
 int uthread_terminate(int tid)
 {
     context_switch_lock lock;
+
     if(tid == 0){
+      if(current_running_thread_tid != 0){
+         terminate_process_from_non_main();
+      }
       terminate_process();
     }
     if(!thread_exists(tid))
@@ -463,7 +455,6 @@ int uthread_terminate(int tid)
     }
     Thread* thread_to_terminate = threads_map[tid];
     if(thread_to_terminate -> get_state() == RUNNING){
-//      switch_threads (true, true);
       threads_to_delete.push_back(tid);  // Defer deletion!
       remove_tid_from_ready_queue (tid);
       switch_threads(true, false);       // Just mark it blocked, do NOT delete here
@@ -478,16 +469,30 @@ int uthread_terminate(int tid)
     destroy_thread(tid);
     return 0;
   }
-void terminate_process ()
+void terminate_process_from_non_main ()
 {
-  for (auto& pair : threads_map) {
-    int tid = pair.first;
-    Thread* second = pair.second;
-    // Skip terminating the main thread (tid == 0) if that's part of your design
-    delete second;
+  while(!ready_queue.empty()){
+    ready_queue.pop();
   }
+  ready_queue.push (0);
+  terminate = true;
+  switch_threads (false, false);
+}
+void terminate_process() {
+  for (auto& pair : threads_map) {
+    if(pair.second != nullptr){
+      delete pair.second;  // Clean up each thread
+    }
+  }
+  threads_map.clear();  // Clear the map completely
+
+  // Clear other containers
+  while (!ready_queue.empty()) ready_queue.pop();
+  while (!available_tids.empty()) available_tids.pop();
+  threads_to_delete.clear();
   exit(0);
 }
+
 void remove_tid_from_ready_queue (int tid)
 {
   std::queue<int> temp_queue;
@@ -542,27 +547,6 @@ int uthread_block(int tid)
     return 0;
   }
   remove_tid_from_ready_queue (tid);
-//  if(tid == current_running_thread_tid){
-//    // If the current running thread is being blocked, we need to perform a scheduling decision
-//    // 1. Move the current thread to the BLOCKED state
-//    thread_to_block->set_state(BLOCKED);
-//
-//    // 2. Check the ready queue isn't empty:
-//    if (ready_queue.empty()) {
-//      std::cerr << "thread library error: no threads to schedule after blocking the current one.\n";
-//      return -1;
-//    }
-//
-//    // 3. Select the next thread to run
-//    current_running_thread_tid = ready_queue.front();
-//    ready_queue.pop();
-//
-//    // 4. Set the new running thread state to RUNNING
-//    threads_map[current_running_thread_tid]->set_state(RUNNING);
-//
-//    // Switch context: saving current thread's context and jumping to the new thread
-//    siglongjmp(*threads_map[current_running_thread_tid]->get_env(), 1);
-//  }
   thread_to_block->set_state (BLOCKED);
   return 0;
 }
@@ -589,11 +573,7 @@ int uthread_resume(int tid)
   if(thread_state == RUNNING || thread_state == READY){
     return 0;
   }
-//  if(thread_state == BLOCKED && thread_to_resume->get_remaining_sleep_time()
-//  == 0){
-//    thread_to_resume->set_state (READY);
-//    ready_queue.push (tid);
-//  }
+
   if(thread_state == BLOCKED){
     thread_to_resume->set_state (READY);
     ready_queue.push (tid);
@@ -630,90 +610,12 @@ int uthread_sleep(int num_quantums)
   // Get the current running thread
   Thread* running_thread = threads_map[current_running_thread_tid];
 
-  // Move the current thread to BLOCKED state
-//  running_thread->set_state(BLOCKED); // todo check if in switch threads
-
-  // Add the sleeping thread to a map with num_quantums as the key (to track when it should be resumed)
-//  sleeping_threads[current_running_thread_tid] = num_quantums +
-//      quantums_passed;
-
   running_thread->set_remaining_sleep_time (num_quantums);
   running_thread->set_is_sleeping (true);
   switch_threads(false, false);
 
   return 0;
 }
-//void schedule ()
-//{
-////  context_switch_lock lock;
-////  // Check sleeping threads and move them back to READY if their time is up
-////  for (auto it = sleeping_threads.begin(); it != sleeping_threads.end(); ) {
-////    int tid = it->first;
-////    int remaining_quantums = it->second;
-////
-////    if (remaining_quantums <= 0) {
-////      // The thread has finished sleeping
-////      Thread* thread_to_wake = threads_map[tid];
-////      thread_to_wake->set_state(READY);
-////      ready_queue.push(tid);
-////
-////      // Remove from sleeping threads
-////      it = sleeping_threads.erase(it);  // Erase and move to next element
-////    } else {
-////      // Decrease the number of quantums remaining
-////      it->second--;
-////      ++it;
-////    }
-////  }
-//  context_switch_lock lock;
-//
-//  // Update sleep time for all sleeping threads
-//  for (auto& thread_pair : threads_map) {
-//    auto* thread = thread_pair.second;
-//    if (thread->get_state() == SLEEPING && thread->get_remaining_sleep_time () > 0) {
-//      // Decrement the remaining sleep time by the timer's period (e.g., 1 ms)
-//      thread->set_remaining_sleep_time (
-//          thread->get_remaining_sleep_time () - quantum_def);
-//
-//      // If the thread's sleep time has expired, move it to the READY state
-//      if (thread->get_remaining_sleep_time () <= 0) {
-//        thread->set_state(READY);
-//        ready_queue.push(thread_pair.first);  // Add to ready queue
-//      }
-//    }
-//  }
-//
-//  // Check if there's a thread in the ready queue to run
-//  if (ready_queue.empty() && thread_count > 1) {
-//    // If no thread is ready, but we have threads, we should call for a timer to yield control
-//    return;
-//  }
-//
-//  // Choose the next thread to run (e.g., choose the next ready thread)
-//  int next_tid = ready_queue.front();  // Or any other logic to pick the next thread
-//
-//  // Ensure that the current thread is not selected again
-//  while (next_tid == current_running_thread_tid && !ready_queue.empty()) {
-//    ready_queue.pop();
-//    next_tid = ready_queue.front();  // Pick the next available thread
-//  }
-//
-//  // If we have a valid next thread, do a context switch
-//  if (next_tid != current_running_thread_tid && next_tid != 0) {
-//    // Mark the current thread as ready again if it's not terminated
-//    if (threads_map[current_running_thread_tid] != nullptr) {
-//      threads_map[current_running_thread_tid]->set_state(READY);
-//      ready_queue.push(current_running_thread_tid);
-//    }
-//
-//    // Set the next thread to running
-//    current_running_thread_tid = next_tid;
-//    threads_map[current_running_thread_tid]->set_state(RUNNING);
-//
-//    // Perform the context switch (the actual switch happens here)
-//    switch_threads(false, false);
-//  }
-//}
 
 /**
  * @brief Returns the thread ID of the calling thread.
@@ -769,6 +671,9 @@ void switch_threads(bool is_blocked, bool terminate_running)
   // Save the current context
   if (!terminate_running && sigsetjmp(*current_thread->get_env(), 1) != 0)
   {
+    if (current_thread->get_tid() == 0 && terminate){
+      terminate_process();
+    }
     return;  // We're returning from a context switch
   }
 
@@ -780,13 +685,11 @@ void switch_threads(bool is_blocked, bool terminate_running)
     }
   }
   else if(!terminate_running){
-//    setup_timer();
     current_thread->set_state (BLOCKED);
   }
   // Update state of current thread
   if (terminate_running)
   {
-//    threads_to_delete.push_back (old_tid);
     destroy_thread (old_tid);
   }
 
@@ -805,7 +708,6 @@ void switch_threads(bool is_blocked, bool terminate_running)
   next_thread->set_state(RUNNING);
   next_thread->increment_quantum();
   quantums_passed++;
-//  std::cerr << "Switching to thread: " << current_running_thread_tid << std::endl;
   setup_timer();
   siglongjmp(*next_thread->get_env(), 1);
 }
