@@ -1,4 +1,6 @@
 #include "uthreads.h"
+#include "thread.h"
+#include "context_switch_lock.h"
 #include <iostream>
 #include <unordered_map>
 #include <queue>
@@ -18,208 +20,6 @@ using std::vector;
 using std::priority_queue;
 using std::greater;
 
-#define MAIN_THREAD_TID 0
-#ifdef __x86_64__
-/* code for 64 bit Intel arch */
-
-typedef unsigned long address_t;
-#define JB_SP 6
-#define JB_PC 7
-
-static int stack_alloc_count = 0;
-static int stack_free_count = 0;
-
-/* A translation is required when using an address of a variable.
-   Use this as a black box in your code. */
-address_t translate_address(address_t addr)
-{
-  address_t ret;
-  asm volatile("xor    %%fs:0x30,%0\n"
-               "rol    $0x11,%0\n"
-      : "=g" (ret)
-      : "0" (addr));
-  return ret;
-}
-
-#else
-/* code for 32 bit Intel arch */
-
-typedef unsigned int address_t;
-#define JB_SP 4
-#define JB_PC 5
-
-
-/* A translation is required when using an address of a variable.
-   Use this as a black box in your code. */
-address_t translate_address(address_t addr)
-{
-    address_t ret;
-    asm volatile("xor    %%gs:0x18,%0\n"
-                 "rol    $0x9,%0\n"
-    : "=g" (ret)
-    : "0" (addr));
-    return ret;
-}
-
-
-#endif
-
-// ========================
-// Internal Global Variables
-// ========================
-class context_switch_lock
-{
- public:
-  context_switch_lock() {
-    disable_context_switch ();
-  }
-  ~context_switch_lock() {
-    enable_context_switch ();
-  }
-
- private:
-  static void disable_context_switch()
-  {
-    sigset_t sigset;
-    sigemptyset(&sigset);
-    sigaddset(&sigset, SIGVTALRM);
-    if (-1 == sigprocmask(SIG_BLOCK, &sigset, nullptr))
-    {
-      std::cerr <<"system error: failed to disable context switch";
-      exit(1);
-    }
-  }
-
-  static void enable_context_switch()
-  {
-    sigset_t sigset;
-    sigemptyset(&sigset);
-    sigaddset(&sigset, SIGVTALRM);
-    if (-1 == sigprocmask(SIG_UNBLOCK, &sigset, nullptr))
-    {
-      std::cerr <<"system error: failed to enable context switch";
-      exit(1);
-    }
-  }
-};
-
-enum State{
-    RUNNING, BLOCKED, READY
-};
-
-class Thread{
-
-  private:
-    int tid;
-    State state;
-    int quantums_passed;
-    jmp_buf env; // store the execution context
-    thread_entry_point entry_point;
-    char* stack;  // Pointer to the thread's stack
-    int remaining_sleep_time;
-    bool is_sleeping;
-
-
-
- public:
-    Thread(int tid, State state, bool is_main, thread_entry_point
-    entry_point = nullptr, char* stack= nullptr) : tid(tid), state(state),
-    entry_point
-    (entry_point), stack(stack), is_sleeping(false){
-      stack_alloc_count++;
-      quantums_passed = is_main ? 1 : 0;
-      setup_env();
-    }
-
-  int get_tid () const
-  {
-    return tid;
-  }
-
-  void set_state (State state)
-  {
-    this->state = state;
-  }
-  void increment_quantum ()
-  {
-    this->quantums_passed++;
-  }
-  // Getter for the jmp_buf (so you can access it in the handler)
-  jmp_buf* get_env() {
-    return &env;
-  }
-
-  State get_state () const
-  {
-    return state;
-  }
-  int get_quantums_passed () const
-  {
-    return quantums_passed;
-  }
-  int get_remaining_sleep_time () const
-  {
-    return remaining_sleep_time;
-  }
-  void set_remaining_sleep_time (int time_left)
-  {
-    Thread::remaining_sleep_time = time_left;
-  }
-  bool get_is_sleeping () const
-  {
-    return is_sleeping;
-  }
-  void set_is_sleeping (bool is_sleeping)
-  {
-    Thread::is_sleeping = is_sleeping;
-  }
-
-  // Initialize the execution context for the thread
-  // Modify your setup_env method
-  bool setup_env() {
-    if (sigsetjmp(env, 1) == 0) {
-      // If this is the main thread or we're just saving context, return true
-      if (tid == MAIN_THREAD_TID || !entry_point) {
-        return true;
-      }
-
-      // Setup for a new thread with entry_point
-      // Calculate the top of the stack (stack grows downward)
-      address_t sp = (address_t)stack + STACK_SIZE - sizeof(address_t);
-
-      // Set the program counter to the entry point function
-      address_t pc = (address_t)entry_point;
-
-      (void)sigsetjmp(env, 1);
-      // Translate and store both addresses in the jmp_buf
-      (env->__jmpbuf)[JB_SP] = translate_address(sp);
-      (env->__jmpbuf)[JB_PC] = translate_address(pc);
-      (void)sigemptyset(&env->__saved_mask);
-      return true;
-    }
-
-    // If we get here, we've returned from siglongjmp
-    // This is where the new thread actually starts executing
-    // For non-main threads, call their entry point
-    if (tid != MAIN_THREAD_TID && entry_point) {
-      entry_point();
-
-      // If the entry point returns, we need to terminate the thread
-      uthread_terminate(tid);
-    }
-
-    return false;
-  }
-
-  // Destructor to free the stack memory
-  ~Thread() {
-    if (stack != nullptr) {
-      delete[] stack;
-      stack = nullptr;
-      stack_free_count++; // Track each deallocation
-    }
-  }
-};
 
 void remove_tid_from_ready_queue (int tid);
 void terminate_process ();
@@ -284,7 +84,6 @@ void setup_signal_handler() {
   struct sigaction sa{};
   sa.sa_handler = &timer_handler;
   sa.sa_flags = 0;
-  int sigset_retval = 0;
   sigemptyset(&sa.sa_mask);
   sigaddset(&sa.sa_mask, SIGVTALRM);
 
@@ -334,7 +133,8 @@ int uthread_init(int quantum_usecs)
   quantums_passed = 1;
   Thread* main_thread;
 try{
-  main_thread = new Thread(MAIN_THREAD_TID,RUNNING, true, nullptr, nullptr);
+  main_thread = new Thread(MAIN_THREAD_TID,RUNNING, true, nullptr, nullptr,
+                           reinterpret_cast<callback_t>(uthread_terminate));
 } catch (const std::bad_alloc&){
   std::cerr << "system error: main thread allocation failed\n";
 }
@@ -394,14 +194,13 @@ int uthread_spawn(thread_entry_point entry_point)
   available_tids.pop();
 
 
-  Thread* new_thread = new Thread(new_tid, READY, false, entry_point, stack);
+  Thread* new_thread = new Thread(new_tid, READY, false, entry_point, stack,
+                                  reinterpret_cast<callback_t>(uthread_terminate));
   threads_map[new_tid] = new_thread;
 
   ready_queue.push (new_tid);
 
   thread_count++;
-
-
   return new_tid;
 }
 static void destroy_thread(int tid){
