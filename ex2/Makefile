@@ -1,7 +1,7 @@
 CC=g++              # C++ compiler
 CXX=g++             # C++ compiler (again, redundant with CC)
 
-CODESRC=uthreads.cpp thread.cpp context_switch_lock.cpp # Source file
+CODESRC=thread.cpp context_switch_lock.cpp uthreads.cpp# Source file
 OBJ=$(CODESRC:.cpp=.o)        # Object file
 LIBRARY=libuthreads.a # Static library name
 
@@ -24,7 +24,7 @@ $(LIBRARY): $(OBJ)
 	$(AR) rcs $@ $^
 
 # Rule to compile the object file
-$(OBJ): $(CODESRC)
+%.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Clean up object files and library
